@@ -33,14 +33,12 @@ def main():
     parser.add_argument('--prepare-gabb-z2-oem-unlock', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--acknowledge-oem-unlock', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--verbose', action='store_true', help='Include the full JSON report and command audit')
-    parser.add_argument('--skip-firmware-check', action='store_true', help='Test other Z5157V Android 10 builds; skip exact fingerprint allowlist only')
+    parser.add_argument('--skip-firmware-check', action='store_true', help='Compatibility option; exact firmware builds are no longer restricted')
     args = parser.parse_args()
     if args.no_oem_unlock:
         print('OEM-unlock preparation disabled; running Stage 1 only.')
     else:
         print('OEM-unlock preparation enabled. A later manual bootloader unlock may erase all data.')
-    if args.skip_firmware_check and not args.no_oem_unlock:
-        print('Testing mode: exact firmware check disabled. Model and Android 10 checks remain enabled.')
     try:
         stage1 = Stage1Exploit(device_serial=args.serial)
     except ZygoteInjectionException as error:
@@ -53,7 +51,7 @@ def main():
     if args.no_oem_unlock:
         print('Stage 1 complete. OEM-unlock preparation skipped.')
         return 0
-    report = Stage2Exploit().exploit_stage2(prepare_gabb_z2=True, acknowledged=True, skip_firmware_check=args.skip_firmware_check)
+    report = Stage2Exploit().exploit_stage2(prepare_gabb_z2=True, acknowledged=True)
     print_summary(report)
     if args.verbose:
         print('\nFull audit report:')

@@ -8,13 +8,13 @@ This fork of [Anonymous941/zygote-injection-toolkit](https://github.com/Anonymou
 
 ## Compatibility
 
-The default Stage 2 workflow is restricted to ZTE Z5157V Android 10 with this firmware fingerprint:
+The default Stage 2 workflow supports ZTE Z5157V Android 10 firmware builds without an exact build allowlist. The original development firmware was:
 
 ```text
 ZTE/VZW_Z5157V/Z5157:10/QP1A.190711.020/20220816.160100:user/release-keys
 ```
 
-This is the firmware allowlist encoded in the tool, not a guarantee of success on every matching device. Stage 2 also checks device state, including owner and policy restrictions, before proceeding.
+The maintainer also reports success on the latest firmware available to their device; its exact fingerprint has not been recorded here. This does not guarantee compatibility with every future build. Stage 2 still checks device identity, Android 10, required services, and device state, including owner and policy restrictions, before proceeding. A working Stage 1 does not establish that Stage 2's service interfaces are unchanged.
 
 Stage 1 uses the upstream vulnerability, addressed in the [June 2024 Android security bulletin](https://source.android.com/security/bulletin/2024-06-01). Its compatibility checks are separate from Stage 2's phone-specific restrictions. Other Android devices are not supported by this fork's default preparation workflow.
 
@@ -77,7 +77,7 @@ python -m zygote_injection_toolkit
 | `--serial SERIAL` | Select an ADB device; required when multiple devices are connected. |
 | `--no-oem-unlock` | Run Stage 1 only and skip Stage 2's OEM restriction and allowance changes. Stage 1 still runs the exploit. |
 | `--verbose` | Include the full Stage 2 JSON report and command audit. |
-| `--skip-firmware-check` | Permit testing another Z5157V Android 10 firmware fingerprint. Device identity, Android version, and other state checks remain enabled. Compatibility with other builds is unverified. |
+| `--skip-firmware-check` | Retained for compatibility with older commands; has no effect because exact firmware builds are no longer restricted. |
 
 Stage 1 establishes a shell on port 1234 through ADB forwarding. Default execution then performs Stage 2 preparation. `PREPARED` and `ALREADY_PREPARED` are successful results and produce exit code 0; failed preparation produces exit code 1. Stage 1-only execution returns 0 when Stage 1 succeeds.
 
@@ -104,7 +104,7 @@ Before publishing, increment the version in `pyproject.toml`. CI builds the whee
 
 ## Changes and attribution
 
-Version 0.2.0 identifies this Gabb Z2 fork. Compared with upstream, the working tree adds device selection and CLI reporting, replaces Stage 2 with firmware-restricted OEM-unlock preparation, and updates packaging and documentation for this fork.
+Version 0.2.0 identifies this Gabb Z2 fork. Compared with upstream, the working tree adds device selection and CLI reporting, replaces Stage 2 with Z5157V Android 10 OEM-unlock preparation, and updates packaging and documentation for this fork. Exact firmware build restrictions have been removed; device identity and Android-version checks remain.
 
 The original toolkit and exploit implementation come from the upstream project and its contributors. This fork retains the GPL-3.0-or-later license; see [LICENSE](LICENSE).
 

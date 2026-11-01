@@ -1,13 +1,10 @@
-"""Explicit OEM preparation; restricted to the observed Z5157V Android 10 build."""
+"""OEM preparation for Z5157V Android 10 firmware builds."""
 import re
 import shlex
 import socket
 import time
 import uuid
 from .exceptions import ZygoteInjectionException as Error
-
-FINGERPRINT = 'ZTE/VZW_Z5157V/Z5157:10/QP1A.190711.020/20220816.160100:user/release-keys'
-
 
 def parse_service_result(text):
     text = text.strip()
@@ -75,7 +72,6 @@ class Stage2Exploit:
     def __init__(self, port=1234):
         self.port = port
         self.audit = []
-        self.skip_firmware_check = False
 
     def shell(self, sock, command):
         token = uuid.uuid4().hex
@@ -119,14 +115,10 @@ class Stage2Exploit:
             raise Error('Setter failed or unsupported reply: ' + data.hex())
 
     def check(self, sock):
-        expected = {'id -u': '1000', 'getprop ro.build.version.sdk': '29', 'getprop ro.build.version.release': '10', 'getprop ro.build.fingerprint': FINGERPRINT, 'getprop ro.oem_unlock_supported': '1', 'am get-current-user': '0'}
+        expected = {'id -u': '1000', 'getprop ro.build.version.sdk': '29', 'getprop ro.build.version.release': '10', 'getprop ro.oem_unlock_supported': '1', 'am get-current-user': '0'}
         fingerprint = self.shell(sock, 'getprop ro.build.fingerprint')
-        if self.skip_firmware_check:
-            if not re.fullmatch(r'ZTE/VZW_Z5157V/Z5157:10/[^/\s]+/[^/\s]+:user/release-keys', fingerprint):
-                raise Error('Firmware override requires ZTE Z5157V Android 10 identity')
-            del expected['getprop ro.build.fingerprint']
-        elif fingerprint != FINGERPRINT:
-            raise Error('Unsupported firmware fingerprint; use --skip-firmware-check only to test another Z5157V Android 10 build')
+        if not re.fullmatch(r'ZTE/VZW_Z5157V/Z5157:10/[^/\s]+/[^/\s]+:user/release-keys', fingerprint):
+            raise Error('Requires ZTE Z5157V Android 10 identity')
         for command, value in expected.items():
             if self.shell(sock, command) != value:
                 raise Error('Unsupported device/session: ' + command)
@@ -136,11 +128,11 @@ class Stage2Exploit:
         return owner_restrictions(self.shell(sock, 'dumpsys user'))
 
     def exploit_stage2(self, *, prepare_gabb_z2=False, acknowledged=False, skip_firmware_check=False):
+        # skip_firmware_check is retained as a compatibility no-op for callers.
         if not (prepare_gabb_z2 and acknowledged):
             return {'status': 'SKIPPED', 'message': 'Explicit Gabb Z2 opt-in required'}
         self.audit = []
-        self.skip_firmware_check = skip_firmware_check
-        report = {'status': 'FAILED_BEFORE_WRITE', 'firmwareCheckSkipped': skip_firmware_check, 'setterAttempted': False, 'restrictionCleared': False, 'userAllowanceChangedThisRun': False}
+        report = {'status': 'FAILED_BEFORE_WRITE', 'firmwarePolicy': 'Z5157V Android 10; no exact build allowlist', 'setterAttempted': False, 'restrictionCleared': False, 'userAllowanceChangedThisRun': False}
         try:
             with socket.create_connection(('127.0.0.1', self.port), timeout=10) as sock:
                 original = self.check(sock)
