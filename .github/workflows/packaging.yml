@@ -38,6 +38,7 @@ jobs:
           for artifact in "$GITHUB_WORKSPACE"/dist/*; do
             env_dir=$(mktemp -d)
             python -m venv "$env_dir/venv"
+            "$env_dir/venv/bin/python" -m pip install --upgrade pip
             "$env_dir/venv/bin/python" -m pip install "$artifact"
             (
               cd "$env_dir"

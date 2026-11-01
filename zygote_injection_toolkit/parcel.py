@@ -121,7 +121,7 @@ class ServiceFunction:
             raise ValueError("cannot parse unknown argument types")
         if len(self.schema) != len(arguments):
             raise ValueError(
-                f"service function takes {len(self.schema):d} arguments but {len(arguments)} {"was" if len(arguments) == 1 else "were"} given"
+                f"service function takes {len(self.schema):d} arguments but {len(arguments)} {'was' if len(arguments) == 1 else 'were'} given"
             )
         encoded_arguments = []
         for argument_type, value in zip(self.schema, arguments):
