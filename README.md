@@ -1,5 +1,7 @@
 # Zygote injection toolkit — Gabb Z2 fork
 
+NOTE: Run the [Z2-Liberator Setup](https://z2-liberator-beta.eth0s.dev/) BEFORE running this project to get ADB access
+
 This fork of [Anonymous941/zygote-injection-toolkit](https://github.com/Anonymous941/zygote-injection-toolkit) adds device-specific OEM-unlock preparation for the Gabb Z2 (ZTE Z5157V), using Android Zygote injection (CVE-2024-31317).
 
 **OEM-unlock preparation runs by default and changes device settings.** It attempts to clear the OEM-unlock restriction and enable the user allowance, while checking the carrier allowance. It does not unlock the bootloader or reboot the phone. A later manual bootloader unlock may erase all data. Successful preparation does not prove that bootloader unlocking will succeed, and persistence after reboot has not been verified.
