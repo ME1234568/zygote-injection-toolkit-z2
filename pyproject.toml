@@ -1,23 +1,32 @@
 [build-system]
-requires = [
-    "setuptools>=60",
-    "setuptools-scm>=8.0"]
+requires = ["setuptools>=77.0.3"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "zygote_injection_toolkit"
-version = "0.1"
+name = "zygote-injection-toolkit-z2"
+version = "0.2.0"
 dependencies = [
-  "pure-python-adb@git+https://github.com/Anonymous941/pure-python-adb",
-  "aidl@git+https://github.com/MatrixEditor/aidl-parser"
+  # The pinned aidl parser imports six but does not declare it itself.
+  "six>=1.16,<2",
+  "pure-python-adb @ git+https://github.com/Anonymous941/pure-python-adb@4d8eb69b013caa12b4d45efa1058ffa0f8e614d4",
+  "aidl @ git+https://github.com/MatrixEditor/aidl-parser@14ea6359e9e8f4c52c2267e319c0e5541cc8151d"
 ]
-requires-python = ">=3"
-description = "Toolkit for exploiting Android zygote injection (CVE-2024-31317)"
+requires-python = ">=3.10"
+description = "Gabb Z2 fork of the Android zygote injection toolkit (CVE-2024-31317)"
 readme = "README.md"
 license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
 classifiers = [
   "Programming Language :: Python"
 ]
+
+[project.urls]
+Repository = "https://github.com/ME1234568/zygote-injection-toolkit-z2"
+Issues = "https://github.com/ME1234568/zygote-injection-toolkit-z2/issues"
+Upstream = "https://github.com/Anonymous941/zygote-injection-toolkit"
+
+[tool.setuptools.packages.find]
+include = ["zygote_injection_toolkit*"]
 
 [tool.setuptools.package-data]
 zygote_injection_toolkit = ["*.aidl"]

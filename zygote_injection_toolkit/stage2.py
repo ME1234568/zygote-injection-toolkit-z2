@@ -1,181 +1,177 @@
-import socket
-import codecs
+"""Explicit OEM preparation; restricted to the observed Z5157V Android 10 build."""
 import re
 import shlex
-from typing import Any
-from io import BytesIO
-from warnings import warn
-from pathlib import Path
+import socket
+import time
+import uuid
+from .exceptions import ZygoteInjectionException as Error
 
-import aidl
-
-from .exceptions import *
-from .parcel import *
+FINGERPRINT = 'ZTE/VZW_Z5157V/Z5157:10/QP1A.190711.020/20220816.160100:user/release-keys'
 
 
-def swap_endianness(bytes_: bytes) -> bytes:
-    result = b""
-    bytes_io = BytesIO(bytes_)
-    while True:
-        read_bytes = bytes_io.read(4)
-        if not read_bytes:
-            break
-        result += read_bytes[::-1]
-    return result
-
-
-# https://stackoverflow.com/a/53198696
-
-
-def parse_service_result(service_result: str) -> bytes:
-    'decodes the raw response from the "service call" AOSP command line utility'
-    EXPRESSION = re.compile(
-        r"^(?:Result\: Parcel\(|  0x[0-9a-fA-F]+: )((?:[0-9a-fA-F ])+)'[^']*'\)?$"
-    )
-
-    matched_any = False
-    result = b""
-    for line in service_result.split("\n"):
-        matched = EXPRESSION.fullmatch(line)
-        if matched is None:
+def parse_service_result(text):
+    text = text.strip()
+    if not text.startswith('Result: Parcel(') or not text.endswith(')'):
+        raise Error('Incomplete Binder Parcel: ' + repr(text))
+    words = []
+    for line in text[len('Result: Parcel('):-1].splitlines():
+        if not line.strip():
             continue
-        matched_any = True
-        result += codecs.decode(matched[1].replace(" ", ""), "hex")
-    # print(swap_endianness(result)[4:].decode("utf-16le"))
-    if not matched_any:
-        raise ZygoteInjectionException("service call failed")
-    return swap_endianness(result)
+        offset = re.match(r'\s*0x([0-9a-fA-F]+):\s*', line)
+        if offset:
+            if int(offset[1], 16) != len(words) * 4:
+                raise Error('Noncontiguous Parcel offsets')
+            line = line[offset.end():]
+        match = re.fullmatch(r"\s*((?:[0-9a-fA-F]{8}\s+)+)'[^']*'\s*", line)
+        if not match:
+            raise Error('Unsupported Parcel line: ' + repr(line))
+        words.extend(int(word, 16) for word in match[1].split())
+    if not words:
+        raise Error('Empty Binder reply')
+    return b''.join(word.to_bytes(4, 'little') for word in words)
 
 
-# aosp/frameworks/base/core/java/android/service/oemlock/IOemLockService.aidl
-# 0 = String getLockName();
-# 1 = void setOemUnlockAllowedByCarrier(boolean allowed, in byte[] signature);
-# 2 = boolean isOemUnlockAllowedByCarrier();
-# 3 = void setOemUnlockAllowedByUser(boolean allowed);
-# 4 = boolean isOemUnlockAllowedByUser();
-# 5 = boolean isOemUnlockAllowed();
-# 6 = boolean isDeviceOemUnlocked();
+def parse_boolean_result(data):
+    if len(data) != 8 or data[:4] != bytes(4):
+        raise Error('Invalid Boolean reply or Binder exception: ' + data.hex())
+    value = int.from_bytes(data[4:], 'little')
+    if value not in (0, 1):
+        raise Error('Non-Boolean Binder value')
+    return bool(value)
 
 
-def parse_boolean_result(result: bytes) -> bool:
-    status_code = int.from_bytes(result[:4], "little")
-    if status_code:
-        raise Exception("oh no!")
-    number = int.from_bytes(result[4:8], "little")
-    return bool(number)
-
-
-with open(Path(__file__).parent / "IOemLockService.aidl") as handle:
-    oem_lock_service_aidl = handle.read()
-oem_lock_service = parse_aidl_interface(
-    aidl.fromstring(oem_lock_service_aidl), "IOemLockService"
-)
-known_services = {"oem_lock": oem_lock_service}
+def owner_restrictions(dump):
+    if not re.search(r'(?m)^\s*Device managed: false\s*$', dump) or not re.search(r'(?m)^\s*Device owner id:-10000\s*$', dump):
+        raise Error('Managed device or unknown owner state')
+    records = list(re.finditer(r'(?m)^  UserInfo\{(\d+):[^\n]+', dump))
+    if len(records) != 1 or records[0][1] != '0':
+        raise Error('Requires single owner user 0')
+    record = dump[records[0].start():].split('\n  Device owner id:', 1)[0]
+    flags = re.search(r'UserInfo\{0:[^:}\n]+:([0-9a-fA-F]+)\}', record)
+    if not flags or not int(flags[1], 16) & 2:
+        raise Error('Owner is not admin')
+    for required in ('State: RUNNING_UNLOCKED', 'Has profile owner: false'):
+        if required not in record:
+            raise Error('Missing owner check: ' + required)
+    sections = {}
+    for heading in ('Restrictions', 'Device policy global restrictions', 'Device policy local restrictions', 'Effective restrictions'):
+        matches = re.findall(r'(?m)^    ' + re.escape(heading) + r':[ \t]*\n((?:      [^\n]*\n?)*)', record)
+        if len(matches) != 1 or not matches[0].strip():
+            raise Error('Unknown restriction section: ' + heading)
+        tokens = matches[0].split()
+        if tokens in (['none'], ['null']):
+            tokens = []
+        elif not all(re.fullmatch(r'no_[a-z_]+', token) for token in tokens):
+            raise Error('Unsupported restriction encoding')
+        sections[heading] = set(tokens)
+    if sections['Device policy global restrictions'] or sections['Device policy local restrictions']:
+        raise Error('Device policy restrictions present')
+    if 'no_factory_reset' in sections['Effective restrictions']:
+        raise Error('Factory reset restriction present')
+    return {'base': 'no_oem_unlock' in sections['Restrictions'], 'effective': 'no_oem_unlock' in sections['Effective restrictions']}
 
 
 class Stage2Exploit:
-    def __init__(self, port: int = 1234) -> None:
+    def __init__(self, port=1234):
         self.port = port
+        self.audit = []
+        self.skip_firmware_check = False
 
-    def call_service(
-        self,
-        device_socket: socket.SocketType,
-        service_name: str,
-        function: str,
-        *arguments: ParcelType
-    ) -> ...:
-        interface = known_services[service_name]
-        service_function = interface[function]
-        parsed_arguments = service_function.parse_arguments(arguments)
-
-        command_parameters = [
-            "service",
-            "call",
-            service_name,
-            str(service_function.code),
-            *parsed_arguments,
-        ]
-        command = shlex.join(command_parameters) + "\n"
-        device_socket.sendall(command.encode("utf-8"))
-        service_result = device_socket.recv(10000).decode("utf-8")
-
-        return_value = parse_service_result(service_result)
-        # add an int32 for the status code
-        parsed_return_value = service_function.parse_return(return_value)
-        status_code = parsed_return_value[0]
-
-        formatted_arguments = ", ".join(repr(argument) for argument in arguments)
-        formatted_service_call = f"{function}({formatted_arguments})"
-        if status_code:
-            raise ZygoteInjectionException(
-                f"service call {formatted_service_call} returned error {status_code:d}"
-            )
-        if parsed_return_value[1:]:
-            print(
-                f"service call {formatted_service_call} = {repr(parsed_return_value[1])}"
-            )
-        else:
-            print(f"service call {formatted_service_call}")
+    def shell(self, sock, command):
+        token = uuid.uuid4().hex
+        begin, end = 'ZIT_BEGIN_' + token, 'ZIT_END_' + token
+        script = f"printf '\\n{begin}\\n'\n" + command + '\n' + f"zit_rc=$?\nprintf '\\n{end}:%s\\n' \"$zit_rc\"\n"
+        sock.sendall(script.encode())
+        deadline, data = time.monotonic() + 10, bytearray()
+        marker = re.compile(rb'\n' + end.encode() + rb':([0-9]+)\r?\n')
         try:
-            return parsed_return_value[1]
-        except IndexError:
-            return None
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError('Shell command outcome unknown')
+                sock.settimeout(remaining)
+                chunk = sock.recv(4096)
+                if not chunk:
+                    raise ConnectionError('Shell disconnected; command outcome unknown')
+                data.extend(chunk)
+                if len(data) > 1024 * 1024:
+                    raise Error('Shell response too large')
+                match = marker.search(data)
+                if match:
+                    start = bytes(data).find((begin + '\n').encode())
+                    if start < 0:
+                        raise Error('Missing response start marker')
+                    output = bytes(data[start + len(begin) + 1:match.start()]).decode('utf-8', 'strict').strip()
+                    self.audit.append({'command': command, 'exit': int(match[1]), 'output': output})
+                    if int(match[1]):
+                        raise Error('Command failed: ' + output)
+                    return output
+        except Exception:
+            sock.close()
+            raise
 
-    def exploit_stage2(self):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as device_socket:
-            device_socket.connect(("127.0.0.1", self.port))
-            # in case there is already a partially typed command
-            device_socket.sendall(b"\n")
+    def binder(self, sock, service, code, *args, boolean=False):
+        command = shlex.join(['service', 'call', service, str(code), *map(str, args)])
+        data = parse_service_result(self.shell(sock, command + ' # zit-complete-command'))
+        if boolean:
+            return parse_boolean_result(data)
+        if data != bytes(4):
+            raise Error('Setter failed or unsupported reply: ' + data.hex())
 
-            allowed_by_carrier = self.call_service(
-                device_socket, "oem_lock", "isOemUnlockAllowedByCarrier"
-            )
-            oem_unlock_allowed = self.call_service(
-                device_socket, "oem_lock", "isOemUnlockAllowed"
-            )
-            if not allowed_by_carrier:
-                print(
-                    "OEM unlock is blocked by carrier, attempting to remove carrier lock"
-                )
-                self.call_service(
-                    device_socket, "oem_lock", "setOemUnlockAllowedByCarrier", 1
-                )
-                # verify that the unlock worked
-                if self.call_service(
-                    device_socket, "oem_lock", "isOemUnlockAllowedByCarrier"
-                ):
-                    message = "CARRIER OEM UNLOCK BYPASSED"
-                    print("*" * (len(message) + 4))
-                    print(f"* {message} *")
-                    print("*" * (len(message) + 4))
-                    print("This means you MIGHT be able to root your device!")
-                    print(
-                        'Enable OEM unlock in settings and attempt to unlock the bootloader via "fastboot oem unlock"'
-                    )
-                    print("This may or may not work depending on your device model")
-                else:
-                    print("Could not bypass carrier OEM unlock")
-            if not self.call_service(
-                device_socket, "oem_lock", "isOemUnlockAllowedByUser"
-            ):
-                self.call_service(
-                    device_socket, "oem_lock", "setOemUnlockAllowedByUser", 1
-                )
-                if not self.call_service(
-                    device_socket, "oem_lock", "isOemUnlockAllowedByUser"
-                ):
-                    print(
-                        "Could not change user OEM unlock, please enable it in developer options"
-                    )
-            if not oem_unlock_allowed and self.call_service(
-                device_socket, "oem_lock", "isOemUnlockAllowed"
-            ):
-                print("OEM unlock is now allowed!")
-            if self.call_service(device_socket, "oem_lock", "isDeviceOemUnlocked"):
-                print(
-                    'Your bootloader seems to be unlocked, try running "fastboot flashing ..."'
-                )
+    def check(self, sock):
+        expected = {'id -u': '1000', 'getprop ro.build.version.sdk': '29', 'getprop ro.build.version.release': '10', 'getprop ro.build.fingerprint': FINGERPRINT, 'getprop ro.oem_unlock_supported': '1', 'am get-current-user': '0'}
+        fingerprint = self.shell(sock, 'getprop ro.build.fingerprint')
+        if self.skip_firmware_check:
+            if not re.fullmatch(r'ZTE/VZW_Z5157V/Z5157:10/[^/\s]+/[^/\s]+:user/release-keys', fingerprint):
+                raise Error('Firmware override requires ZTE Z5157V Android 10 identity')
+            del expected['getprop ro.build.fingerprint']
+        elif fingerprint != FINGERPRINT:
+            raise Error('Unsupported firmware fingerprint; use --skip-firmware-check only to test another Z5157V Android 10 build')
+        for command, value in expected.items():
+            if self.shell(sock, command) != value:
+                raise Error('Unsupported device/session: ' + command)
+        for service in ('user', 'oem_lock', 'persistent_data_block'):
+            if self.shell(sock, 'service check ' + service) != f'Service {service}: found':
+                raise Error('Required service unavailable: ' + service)
+        return owner_restrictions(self.shell(sock, 'dumpsys user'))
 
-
-# Stage2Exploit().exploit_stage2()
-# exit()
+    def exploit_stage2(self, *, prepare_gabb_z2=False, acknowledged=False, skip_firmware_check=False):
+        if not (prepare_gabb_z2 and acknowledged):
+            return {'status': 'SKIPPED', 'message': 'Explicit Gabb Z2 opt-in required'}
+        self.audit = []
+        self.skip_firmware_check = skip_firmware_check
+        report = {'status': 'FAILED_BEFORE_WRITE', 'firmwareCheckSkipped': skip_firmware_check, 'setterAttempted': False, 'restrictionCleared': False, 'userAllowanceChangedThisRun': False}
+        try:
+            with socket.create_connection(('127.0.0.1', self.port), timeout=10) as sock:
+                original = self.check(sock)
+                original['allowedByUser'] = self.binder(sock, 'oem_lock', 5, boolean=True)
+                report['original'] = original.copy()
+                if original['base']:
+                    report['setterAttempted'] = True
+                    self.binder(sock, 'user', 35, 's16', 'no_oem_unlock', 'i32', 0, 'i32', 0)
+                state = self.check(sock)
+                if state['base'] or state['effective']:
+                    raise Error('OEM restriction still effective')
+                report['restrictionCleared'] = original['base']
+                if not self.binder(sock, 'oem_lock', 3, boolean=True):
+                    raise Error('Carrier allowance false; stopped')
+                if not original['allowedByUser']:
+                    report['setterAttempted'] = True
+                    self.binder(sock, 'oem_lock', 4, 'i32', 1)
+                if not self.binder(sock, 'oem_lock', 5, boolean=True):
+                    raise Error('User allowance readback false')
+                report['userAllowanceChangedThisRun'] = not original['allowedByUser']
+                if not self.binder(sock, 'oem_lock', 3, boolean=True):
+                    raise Error('Carrier allowance changed')
+                state = self.check(sock)
+                if state['base'] or state['effective']:
+                    raise Error('Restriction returned during verification')
+                report['final'] = {'restrictionPresent': False, 'allowedByUser': True, 'allowedByCarrier': True}
+                report['status'] = 'PREPARED' if report['setterAttempted'] else 'ALREADY_PREPARED'
+                report['message'] = 'Android allowance verified. No bootloader unlock or reboot performed. Persistence untested.'
+        except Exception as error:
+            report['status'] = 'UNKNOWN' if report['setterAttempted'] else 'FAILED_BEFORE_WRITE'
+            report['error'] = str(error)
+            report['message'] = 'No automatic retry or rollback. Read current state before proceeding.'
+        report['audit'] = self.audit
+        return report
